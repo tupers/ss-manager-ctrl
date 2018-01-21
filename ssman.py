@@ -109,16 +109,18 @@ def main(argv=None):
             elif opt == '--socket-address':
                 socketAddr = arg
             elif opt in ('-h', '--help'):
-                print Usage.__doc__()
+                print Usage.__doc__
 
         if cmd_add and (not password):
             raise Usage("opt '-a' need '--password'")
 
     except Usage, err:
         print >>sys.stderr, ERR, err.msg
-        print >>sys.stderr, err.__doc__()
+        print >>sys.stderr, err.__doc__
         return 1
-    
+    if not( cmd_add or cmd_ping or cmd_remove or cmd_addjson ):
+        return 0
+
     try:
         try:
             sock = u_socket(mangerAddr, socketAddr)
