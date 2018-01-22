@@ -35,6 +35,7 @@ class u_socket:
         return self.sock.recv(recvSize)
 
 def keyTerminate(a, b):
+    print "\033[?25h"
     sys.exit(0)
 
 def createCMD(opt, **args):
@@ -53,8 +54,8 @@ def showUsage(json_data):
         print " %s\t%.2f"%(server, mb)
 
 def portMonitor(u_socket):
-    print "******Port Monitor******"
-    print "press <CTRL-C> to terminate"
+    print "Start monitor operation... You can quit with CONTROL-C"
+    print "\033[?25l\t******Port Monitor******"
     print "\tPort\tSPD(KB/s)\tDATA(MB)"
     last_linenum = 0
     sample_time = 2
