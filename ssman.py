@@ -3,6 +3,8 @@ import socket
 import getopt
 import os
 import json
+import time
+import signal
 
 class Usage(Exception):
     '''Operation Usage : [opt] [arg]
@@ -32,6 +34,9 @@ class u_socket:
         self.sock.send(sendMsg)
         return self.sock.recv(recvSize)
 
+def keyTerminate(a, b):
+    sys.exit(0)
+
 def createCMD(opt, **args):
     if opt == "add":
         return "add: {\"server_port\":%d,\"password\":\"%s\"}"%(args["server_port"],args["password"])
@@ -47,6 +52,29 @@ def showUsage(json_data):
         mb = (json_data[server]/1024.0)/1024.0
         print " %s\t%.2f"%(server, mb)
 
+def portMonitor(u_socket):
+    print "******Port Monitor******"
+    print "press <CTRL-C> to terminate"
+    print "\tPort\tSPD(KB/s)\tDATA(MB)"
+    last_linenum = 0
+    sample_time = 2
+    last_msg = None
+    while True:
+        msg = json.loads(u_socket.cmd(createCMD("ping"))[6:])
+        if last_linenum:
+            print "\r\033[%dA"%last_linenum,
+            last_linenum=0
+        for port in msg:
+            mb = (msg[port]/1024.0)/1024.0
+            spd = 0
+            if last_msg:
+                spd = ((msg[port]-last_msg[port])/1024.0)/sample_time
+            print "\t%s\t%.2f\t\t%.2f"%(port, spd, mb)
+            last_linenum += 1
+        last_msg = msg
+        time.sleep(sample_time)
+    
+
 def processJson(opt, u_socket, json_data):
     if opt == "add":
         cmdGroup = json_data["add"]
@@ -60,6 +88,10 @@ def processJson(opt, u_socket, json_data):
         print "'--add-json' result: total add: %d, success %d."%(total,success)
 
 def main(argv=None):
+    
+    
+    signal.signal(signal.SIGINT, keyTerminate)
+
     if argv is None:
         argv = sys.argv
     
@@ -70,6 +102,7 @@ def main(argv=None):
     cmd_ping    = False
     cmd_remove  = False
     cmd_addjson = False
+    cmd_monitor = False
 
     password    = None
     mangerAddr  = "/tmp/manager.sock"
@@ -77,7 +110,7 @@ def main(argv=None):
 
     try:
         try:
-            opts, args = getopt.getopt(argv[1:], "a:hlr:", ["password=", "add-json=", "mangaer-address=", "socket-address=", "help"])
+            opts, args = getopt.getopt(argv[1:], "a:hlmr:", ["password=", "add-json=", "mangaer-address=", "socket-address=", "help"])
         except getopt.error, msg:
             raise Usage(msg)
         
@@ -108,6 +141,8 @@ def main(argv=None):
                 managerAddr = arg
             elif opt == '--socket-address':
                 socketAddr = arg
+            elif opt == '-m':
+                cmd_monitor = True
             elif opt in ('-h', '--help'):
                 print Usage.__doc__
 
@@ -118,7 +153,7 @@ def main(argv=None):
         print >>sys.stderr, ERR, err.msg
         print >>sys.stderr, err.__doc__
         return 1
-    if not( cmd_add or cmd_ping or cmd_remove or cmd_addjson ):
+    if not( cmd_add or cmd_ping or cmd_remove or cmd_addjson or cmd_monitor ):
         return 0
 
     try:
@@ -161,6 +196,9 @@ def main(argv=None):
                 showUsage(recvMsg)
         except Exception, msg:
             print >>sys.stderr, WARN, msg, "opt '-l' failed."
+
+        if cmd_monitor == True:
+            portMonitor(sock)
 
         '''
         ****** Operation End ******
