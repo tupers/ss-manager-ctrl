@@ -1,3 +1,4 @@
+#!/usr/bin/python
 import sys
 import socket
 import getopt
@@ -58,12 +59,12 @@ def portMonitor(u_socket):
     print "\033[?25l\t******Port Monitor******"
     print "\tPort\tSPD(KB/s)\tDATA(MB)"
     last_linenum = 0
-    sample_time = 2
+    sample_time = 5
     last_msg = None
     while True:
         msg = json.loads(u_socket.cmd(createCMD("ping"))[6:])
         if last_linenum:
-            print "\r\033[%dA"%last_linenum,
+            print "\033[%dA"%last_linenum,
             last_linenum=0
         for port in msg:
             mb = (msg[port]/1024.0)/1024.0
