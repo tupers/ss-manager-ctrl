@@ -105,14 +105,16 @@ def main(argv=None):
     cmd_remove  = False
     cmd_addjson = False
     cmd_monitor = False
+    cmd_service = False
 
     password    = None
     mangerAddr  = "/tmp/manager.sock"
     socketAddr  = "/tmp/client.sock"
+    pidPath     = ""
 
     try:
         try:
-            opts, args = getopt.getopt(argv[1:], "a:hlmr:", ["password=", "add-json=", "mangaer-address=", "socket-address=", "help"])
+            opts, args = getopt.getopt(argv[1:], "a:f:hlmr:", ["password=", "add-json=", "manager-address=", "socket-address=", "help"])
         except getopt.error, msg:
             raise Usage(msg)
         
@@ -147,9 +149,14 @@ def main(argv=None):
                 cmd_monitor = True
             elif opt in ('-h', '--help'):
                 print Usage.__doc__
+            elif opt in ('-f'):
+                cmd_service = True
+                pidPath = arg
 
         if cmd_add and (not password):
             raise Usage("opt '-a' need '--password'")
+        if cmd_monitor and cmd_service:
+            raise Usage("can not use opt '-m' and '-f' at the same time")
 
     except Usage, err:
         print >>sys.stderr, ERR, err.msg
@@ -201,6 +208,8 @@ def main(argv=None):
 
         if cmd_monitor == True:
             portMonitor(sock)
+
+        if cmd_service == True:
 
         '''
         ****** Operation End ******
