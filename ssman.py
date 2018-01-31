@@ -6,6 +6,7 @@ import os
 import json
 import time
 import signal
+import sqlite3
 
 class Usage(Exception):
     '''Operation Usage : [opt] [arg]
@@ -88,6 +89,70 @@ def processJson(opt, u_socket, json_data):
             if ack == "ok":
                 success += 1
         print "'--add-json' result: total add: %d, success %d."%(total,success)
+
+def daemonize(Path):
+    pid = os.fork()
+    if pid > 0:
+        logfd = open("/tmp/ssmand.log", 'w')
+        if not logfd:
+            print "ssman daemon log failed"
+        fd = open(Path, 'w')
+        if fd:
+            fd.write("%s"%pid)
+            fd.flush()
+            sys.exit(0)
+        else:
+            print "open file on '-f' path failed"
+            sys.exit(1)
+    else:
+        print "fork failed"
+        sys.exit(1)
+
+    os.umask(0)
+    if os.setsid():
+        print "setsid failed"
+        sys.exit(1)
+
+    os.chdir("/")
+    os.close(0)
+    os.close(1)
+    os.close(2)
+
+    return logfd
+
+class ss_daemon():
+
+    dpPath = "/opt/data/ss.db"
+
+    def __init__(self):
+        self.db = sqlite3.connect(self.dpPath)
+        self.cursor = self.db.cursor()
+        sql = "create table port(id int, password text)"
+        self.cursor.execute(sql)
+        self.cursor.close()
+        self.db.close()
+
+    def connect(self):
+        self.db = sqlite3.connect(self.dpPath)
+        self.cursor = self.db.cursor()
+
+    def disconnect(self):
+        self.cursor.close()
+        self.db.close()
+
+    def add_port(self, port, password):
+        sql = "insert into port(id, password) values (:p_id, :p_password)"
+        self.cursor.execute(sql, {'p_id':port,'p_password':password})
+        self.db.commit()
+
+    def list_all(self):
+        sql = "select * from port"
+        ports = self.cursor.execute(sql)
+
+        for port in ports.fetchall():
+            print port
+
+
 
 def main(argv=None):
     
@@ -210,6 +275,13 @@ def main(argv=None):
             portMonitor(sock)
 
         if cmd_service == True:
+            #log = daemonize(pidPath)
+            ss = ss_daemon()
+            ss.connect()
+            ss.add_port(7890, "66409266")
+            ss.add_port(7891, "123456")
+            ss.list_all()
+            ss.disconnect()
 
         '''
         ****** Operation End ******
