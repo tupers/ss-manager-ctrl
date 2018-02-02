@@ -122,18 +122,20 @@ def daemonize(Path):
 
 class ss_daemon():
 
-    dpPath = "/opt/data/ss.db"
+    dbPath = "/opt/data/ss.db"
 
-    def __init__(self):
-        self.db = sqlite3.connect(self.dpPath)
+    def __init__(self,dbpath=None):
+        if dbpath:
+            self.dbPath=dbpath
+        self.db = sqlite3.connect(self.dbPath)
         self.cursor = self.db.cursor()
-        sql = "create table port(id int, password text)"
+        sql = "create table IF NOT EXISTS port(id int primary key, password text, datausage real default 0.0)"
         self.cursor.execute(sql)
         self.cursor.close()
         self.db.close()
 
     def connect(self):
-        self.db = sqlite3.connect(self.dpPath)
+        self.db = sqlite3.connect(self.dbPath)
         self.cursor = self.db.cursor()
 
     def disconnect(self):
@@ -173,7 +175,7 @@ def main(argv=None):
     cmd_service = False
 
     password    = None
-    mangerAddr  = "/tmp/manager.sock"
+    managerAddr  = "/tmp/manager.sock"
     socketAddr  = "/tmp/client.sock"
     pidPath     = ""
 
@@ -227,65 +229,61 @@ def main(argv=None):
         print >>sys.stderr, ERR, err.msg
         print >>sys.stderr, err.__doc__
         return 1
-    if not( cmd_add or cmd_ping or cmd_remove or cmd_addjson or cmd_monitor ):
-        return 0
-
     try:
-        try:
-            sock = u_socket(mangerAddr, socketAddr)
-            sock.connect()
-        except socket.error, msg:
-            raise Usage(msg)
-        print "\033[1;32mConnected Success.\033[0m"
+        if ( cmd_add or cmd_ping or cmd_remove or cmd_addjson or cmd_monitor ):
+            try:
+                sock = u_socket(managerAddr, socketAddr)
+                sock.connect()
+            except socket.error, msg:
+                raise Usage(msg)
+            print "\033[1;32mConnected Success.\033[0m"
 
-        '''
-        ****** Operation Start ******
-        '''
+            '''
+            ****** Operation Start ******
+            '''
 
-        try:
-            if cmd_add == True:
-                ack = sock.cmd(createCMD("add", server_port = port_add, password = password))
-                print "add port: %d %s"%(port_add,ack)
-        except Exception, msg:
-            print >>sys.stderr, WARN, msg, "opt '-a' failed."
+            try:
+                if cmd_add == True:
+                    ack = sock.cmd(createCMD("add", server_port = port_add, password = password))
+                    print "add port: %d %s"%(port_add,ack)
+            except Exception, msg:
+                print >>sys.stderr, WARN, msg, "opt '-a' failed."
 
-        try:
-            if cmd_remove == True:
-                ack = sock.cmd(createCMD("remove", server_port = port_remove))
-                print "remove port: %d %s"%(port_remove,ack)
-        except Exception, msg:
-            print >>sys.stderr, WARN, msg, "opt '-r' failed."
+            try:
+                if cmd_remove == True:
+                    ack = sock.cmd(createCMD("remove", server_port = port_remove))
+                    print "remove port: %d %s"%(port_remove,ack)
+            except Exception, msg:
+                print >>sys.stderr, WARN, msg, "opt '-r' failed."
 
-        try:
-            if cmd_addjson == True:
-                jsonMsg = json.load(open(json_path,'r'))
-                processJson("add", sock, jsonMsg)
-        except Exception, msg:
-            print >>sys.stderr, WARN, msg, "opt '--add-json' failed."
+            try:
+                if cmd_addjson == True:
+                    jsonMsg = json.load(open(json_path,'r'))
+                    processJson("add", sock, jsonMsg)
+            except Exception, msg:
+                print >>sys.stderr, WARN, msg, "opt '--add-json' failed."
 
-        try:
-            if cmd_ping == True:
-                recvMsg = sock.cmd(createCMD("ping"))
-                recvMsg = json.loads(recvMsg[6:])
-                showUsage(recvMsg)
-        except Exception, msg:
-            print >>sys.stderr, WARN, msg, "opt '-l' failed."
-
-        if cmd_monitor == True:
+            try:
+                if cmd_ping == True:
+                    recvMsg = sock.cmd(createCMD("ping"))
+                    recvMsg = json.loads(recvMsg[6:])
+                    showUsage(recvMsg)
+            except Exception, msg:
+                print >>sys.stderr, WARN, msg, "opt '-l' failed."
+        elif cmd_monitor:
             portMonitor(sock)
-
-        if cmd_service == True:
+        elif cmd_service:
             #log = daemonize(pidPath)
-            ss = ss_daemon()
+            ss = ss_daemon('test.db')
             ss.connect()
             ss.add_port(7890, "66409266")
             ss.add_port(7891, "123456")
             ss.list_all()
             ss.disconnect()
 
-        '''
-        ****** Operation End ******
-        '''
+            '''
+            ****** Operation End ******
+            '''
 
     except Usage, err:
         print >>sys.stderr, ERR, err.msg
