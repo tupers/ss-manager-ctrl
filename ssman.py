@@ -90,49 +90,30 @@ def processJson(opt, u_socket, json_data):
                 success += 1
         print "'--add-json' result: total add: %d, success %d."%(total,success)
 
-def daemonize(Path):
-    pid = os.fork()
-    if pid > 0:
-        logfd = open("/tmp/ssmand.log", 'w')
-        if not logfd:
-            print "ssman daemon log failed"
-        fd = open(Path, 'w')
-        if fd:
-            fd.write("%s"%pid)
-            fd.flush()
-            sys.exit(0)
-        else:
-            print "open file on '-f' path failed"
-            sys.exit(1)
-    else:
-        print "fork failed"
-        sys.exit(1)
-
-    os.umask(0)
-    if os.setsid():
-        print "setsid failed"
-        sys.exit(1)
-
-    os.chdir("/")
-    os.close(0)
-    os.close(1)
-    os.close(2)
-
-    return logfd
-
 class ss_daemon():
+    manAddr = "/tmp/manager.sock"
+    sockAddr = "/tmp/client.sock"
+    dbPath = "/home/tupers/test.db"
+    pidPath = "/tmp/ssdaemnon.pid"
+    logPath = "/tmp/ssmand.log"
+    
+    def __init__(self, **kwargs):
+        self.setOpt(kwargs, "managerAddr", self.manAddr)
+        self.setOpt(kwargs, "socketAddr", self.sockAddr)
+        self.setOpt(kwargs, "dbPath", self.dbPath)
+        self.setOpt(kwargs, "pidPath", self.pidPath)
+        self.setOpt(kwargs, "logPath", self.logPath)
 
-    dbPath = "/opt/data/ss.db"
-
-    def __init__(self,dbpath=None):
-        if dbpath:
-            self.dbPath=dbpath
         self.db = sqlite3.connect(self.dbPath)
         self.cursor = self.db.cursor()
-        sql = "create table IF NOT EXISTS port(id int primary key, password text, datausage real default 0.0)"
+        sql = "create table IF NOT EXISTS port(id int primary key, datausage real default 0.0, updatetime datetime default current_timestamp)"
         self.cursor.execute(sql)
         self.cursor.close()
         self.db.close()
+
+    def setOpt(self, args, argname, opt):
+        if argname in args:
+            opt = args[argname]
 
     def connect(self):
         self.db = sqlite3.connect(self.dbPath)
@@ -142,9 +123,9 @@ class ss_daemon():
         self.cursor.close()
         self.db.close()
 
-    def add_port(self, port, password):
-        sql = "insert into port(id, password) values (:p_id, :p_password)"
-        self.cursor.execute(sql, {'p_id':port,'p_password':password})
+    def add_port(self, port):
+        sql = "insert into port(id) values (:p_id)"
+        self.cursor.execute(sql, {'p_id':port})
         self.db.commit()
 
     def list_all(self):
@@ -153,7 +134,60 @@ class ss_daemon():
 
         for port in ports.fetchall():
             print port
+    
+    def daemon_exec(self):
+        try:
+            sock = u_socket(self.manAddr, self.sockAddr)
+            sock.connect()
+        except Exception, msg:
+            fd = open(self.logPath, 'w+')
+            fd.write("[%s]\t%s\n"%(self.currentTime(),msg))
+            fd.close()
 
+        while True:
+            time.sleep(10)
+            recvMsg = sock.cmd(createCMD("ping"))
+            recvMsg = json.loads(recvMsg[6:])
+            for server in recvMsg:
+                mb = (recvMsg[server]/1024.0)/1024.0
+                #first update
+                sql = "update port set datausage=%.2f,updatetime=current_timestamp where id=%d"%(mb, int(server))
+                self.cursor.execute(sql)
+                #if no update happened then insert one
+                sql = "insert into port (id, datausage, updatetime) select %d,%.2f,current_timestamp where( select Changes() = 0)"%(int(server), mb)
+                self.cursor.execute(sql)
+            self.db.commit()
+
+    def daemon_create(self):
+        pid = os.fork()
+        if pid > 0:
+            fd = open(self.pidPath, 'w')
+            if fd:
+                fd.write("%s"%pid)
+                fd.flush()
+                fd.close()
+            sys.exit(1)
+        else:
+            logfd = open(self.logPath, 'w')
+            if not logfd:
+                sys.exit(1)
+        logfd.write("[%s]\tstart daemon.\n"%self.currentTime())
+
+        os.umask(0)
+        if os.setsid():
+            logfd.close()
+            sys.exit(1)
+        logfd.write("[%s]\tset sid.\n"%self.currentTime())
+        logfd.close()
+
+        os.chdir("/")
+        os.close(0)
+        os.close(1)
+        os.close(2)
+        
+
+    def currentTime(self):
+        return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
 
 
 def main(argv=None):
@@ -173,6 +207,7 @@ def main(argv=None):
     cmd_addjson = False
     cmd_monitor = False
     cmd_service = False
+    cmd_dbstatus= False
 
     password    = None
     managerAddr  = "/tmp/manager.sock"
@@ -181,7 +216,7 @@ def main(argv=None):
 
     try:
         try:
-            opts, args = getopt.getopt(argv[1:], "a:f:hlmr:", ["password=", "add-json=", "manager-address=", "socket-address=", "help"])
+            opts, args = getopt.getopt(argv[1:], "a:df:hlmr:", ["password=", "add-json=", "manager-address=", "socket-address=", "help"])
         except getopt.error, msg:
             raise Usage(msg)
         
@@ -219,6 +254,8 @@ def main(argv=None):
             elif opt in ('-f'):
                 cmd_service = True
                 pidPath = arg
+            elif opt in ('-d'):
+                cmd_dbstatus = True
 
         if cmd_add and (not password):
             raise Usage("opt '-a' need '--password'")
@@ -270,17 +307,24 @@ def main(argv=None):
                     showUsage(recvMsg)
             except Exception, msg:
                 print >>sys.stderr, WARN, msg, "opt '-l' failed."
-        elif cmd_monitor:
-            portMonitor(sock)
-        elif cmd_service:
-            #log = daemonize(pidPath)
-            ss = ss_daemon('test.db')
-            ss.connect()
-            ss.add_port(7890, "66409266")
-            ss.add_port(7891, "123456")
-            ss.list_all()
-            ss.disconnect()
 
+            try:
+                if cmd_monitor == True:
+                    portMonitor(sock)
+            except Exception, msg:
+                print >>sys.stderr, WARN, msg, "opt '-m' failed."
+
+        elif cmd_dbstatus:
+            db = ss_daemon()
+            db.connect()
+            db.list_all()
+            db.disconnect()
+
+        elif cmd_service:
+            ss = ss_daemon()
+            ss.connect()
+            ss.daemon_create()
+            ss.daemon_exec()
             '''
             ****** Operation End ******
             '''
