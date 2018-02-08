@@ -1,12 +1,14 @@
 #!/usr/bin/python
 import sys
-import socket
 import getopt
 import os
 import json
 import time
 import signal
-import sqlite3
+import socket
+import threading
+import Queue
+from ssutils import ss_database
 
 class Usage(Exception):
     '''Operation Usage : [opt] [arg]
@@ -96,7 +98,11 @@ class ss_daemon():
     dbPath = "/home/tupers/test.db"
     pidPath = "/tmp/ssdaemnon.pid"
     logPath = "/tmp/ssmand.log"
-    
+   
+    daemon_isRun = True
+
+    cmd_queue = Queue.Queue(5)
+
     def __init__(self, **kwargs):
         self.setOpt(kwargs, "managerAddr", self.manAddr)
         self.setOpt(kwargs, "socketAddr", self.sockAddr)
@@ -104,59 +110,38 @@ class ss_daemon():
         self.setOpt(kwargs, "pidPath", self.pidPath)
         self.setOpt(kwargs, "logPath", self.logPath)
 
-        self.db = sqlite3.connect(self.dbPath)
-        self.cursor = self.db.cursor()
-        sql = "create table IF NOT EXISTS port(id int primary key, datausage real default 0.0, updatetime datetime default current_timestamp)"
-        self.cursor.execute(sql)
-        self.cursor.close()
-        self.db.close()
-
     def setOpt(self, args, argname, opt):
         if argname in args:
             opt = args[argname]
 
-    def connect(self):
-        self.db = sqlite3.connect(self.dbPath)
-        self.cursor = self.db.cursor()
-
-    def disconnect(self):
-        self.cursor.close()
-        self.db.close()
-
-    def add_port(self, port):
-        sql = "insert into port(id) values (:p_id)"
-        self.cursor.execute(sql, {'p_id':port})
-        self.db.commit()
-
-    def list_all(self):
-        sql = "select * from port"
-        ports = self.cursor.execute(sql)
-
-        for port in ports.fetchall():
-            print port
-    
     def daemon_exec(self):
         try:
-            sock = u_socket(self.manAddr, self.sockAddr)
-            sock.connect()
+            self.sock = u_socket(self.manAddr, self.sockAddr)
+            self.sock.connect()
         except Exception, msg:
-            fd = open(self.logPath, 'w+')
+            fd = open(self.logPath, 'a')
             fd.write("[%s]\t%s\n"%(self.currentTime(),msg))
             fd.close()
 
-        while True:
-            time.sleep(10)
-            recvMsg = sock.cmd(createCMD("ping"))
-            recvMsg = json.loads(recvMsg[6:])
-            for server in recvMsg:
-                mb = (recvMsg[server]/1024.0)/1024.0
-                #first update
-                sql = "update port set datausage=%.2f,updatetime=current_timestamp where id=%d"%(mb, int(server))
-                self.cursor.execute(sql)
-                #if no update happened then insert one
-                sql = "insert into port (id, datausage, updatetime) select %d,%.2f,current_timestamp where( select Changes() = 0)"%(int(server), mb)
-                self.cursor.execute(sql)
-            self.db.commit()
+        thd_control = threading.Thread(target = self.daemon_control)
+        thd_control.start()
+        thd_update = threading.Thread(target = self.daemon_generalupdate)
+        thd_update.start()
+        self.db = ss_database(self.dbPath)
+        self.db.connect()
+
+        while self.daemon_isRun:
+            try:
+                cmd = self.cmd_queue.get(timeout=11)
+            except Queue.Empty:
+                break
+            self.daemon_process(cmd)
+
+        self.db.disconnect()
+        
+        logfd = open(self.logPath,'a')
+        logfd.write("[%s]\tdaemon end\n"%self.currentTime())
+        logfd.close()
 
     def daemon_create(self):
         pid = os.fork()
@@ -184,15 +169,105 @@ class ss_daemon():
         os.close(0)
         os.close(1)
         os.close(2)
-        
 
     def currentTime(self):
         return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
 
+    def daemon_generalupdate(self):
+        while self.daemon_isRun:
+            self.cmd_queue.put('update')
+            time.sleep(10)
+    
+    def daemon_process(self, cmd):
+        if cmd == 'update':
+            recvMsg = self.sock.cmd(createCMD("ping"))
+            recvMsg = json.loads(recvMsg[6:])
+            for server in recvMsg:
+                mb = (recvMsg[server]/1024.0)/1024.0
+                #first update
+                sql = "update port set datausage=%.2f,updatetime=current_timestamp where id=%d"%(mb, int(server))
+                self.db.db.execute(sql)
+                #if no update happened then insert one
+                sql = "insert into port (id, datausage, updatetime) select %d,%.2f,current_timestamp where( select Changes() = 0)"%(int(server), mb)
+                self.db.db.execute(sql)
+            self.db.db.commit()
+        elif cmd == 'save+':
+            sql = "select id,datausage,datahistory from port"
+            result = self.db.db.execute(sql)
+            for info in result:
+                port = int(info[0])
+                history = float(info[1])+float(info[2])
+                sql = "update port set datahistory=%.2f where id=%d"%(history, port)
+                self.db.db.execute(sql)
+            self.db.db.commit()
+        elif cmd == 'save':
+            sql = "select id,datausage,datahistory from port"
+            result = self.db.db.execute(sql)
+            for info in result:
+                port = int(info[0])
+                history = float(info[1])
+                sql = "update port set datahistory=%.2f where id=%d"%(history, port)
+                self.db.db.execute(sql)
+            self.db.db.commit()
+
+    def daemon_control(self):
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            addr = ('',7000)
+            server.bind(addr)
+        except Exception, msg:
+            logfd = open(self.logPath, 'a')
+            logfd.write("[%s]\t%s\n"%(self.currentTime(), msg))
+            logfd.close()
+            self.daemon_isRun = False
+            return
+
+        while True:
+            data, addr = server.recvfrom(128)
+            logfd = open(self.logPath, 'a')
+            if 'stop' in data:
+                log = "daemon will be closed in 10 seconds."
+                logfd.write("[%s]\t%s\n"%(self.currentTime(),log))
+                server.sendto(log,addr)
+                logfd.close()
+                break
+            elif 'list' in data:
+                logfd.write("[%s]\trecv cmd list\n"%self.currentTime())
+                tmpdb = ss_database(self.dbPath)
+                tmpdb.connect()
+                sql = "select * from port"
+                for port in tmpdb.db.execute(sql):
+                    server.sendto("%s\n"%port.__str__(),addr)
+                tmpdb.disconnect()
+            elif 'save_add' in data:
+                logfd.write("[%s]\trecv cmd save and add\n"%self.currentTime())
+                self.cmd_queue.put('save+')
+            elif 'save_cover' in data:
+                logfd.write("[%s]\trecv cmd save and cover\n"%self.currentTime())
+                self.cmd_queue.put('save')
+            elif 'get' in data:
+                start = data.find('{')
+                end = data.find('}')
+                msg = data[start+1:end]
+                if 'get' in msg:
+                    msg = "%d"%0
+                logfd.write("[%s]\trecv cmd get\n"%self.currentTime())
+                tmpdb = ss_database(self.dbPath)
+                tmpdb.connect()
+                sql = "select * from port where id=%d"%int(msg)
+                result = ""
+                for data in tmpdb.db.execute(sql):
+                    result = data.__str__()
+                tmpdb.disconnect()
+                if result=="":
+                    server.sendto("None",addr)
+                else:
+                    server.sendto(result,addr)
+            
+            logfd.close()
+        self.daemon_isRun = False
 
 def main(argv=None):
-    
-    
     signal.signal(signal.SIGINT, keyTerminate)
 
     if argv is None:
@@ -315,16 +390,16 @@ def main(argv=None):
                 print >>sys.stderr, WARN, msg, "opt '-m' failed."
 
         elif cmd_dbstatus:
-            db = ss_daemon()
+            db = ss_database("/home/tupers/test.db")
             db.connect()
-            db.list_all()
+            for info in db.list():
+                print info
             db.disconnect()
 
         elif cmd_service:
-            ss = ss_daemon()
-            ss.connect()
-            ss.daemon_create()
-            ss.daemon_exec()
+            daemon = ss_daemon(pidPath=pidPath)
+            #daemon.daemon_create()
+            daemon.daemon_exec()
             '''
             ****** Operation End ******
             '''
