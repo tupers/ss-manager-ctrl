@@ -8,7 +8,7 @@ import signal
 import socket
 import threading
 import Queue
-from ssutils import ss_database
+from ssutils import ss_database, ssmanErr
 
 class Usage(Exception):
     '''Operation Usage : [opt] [arg]
@@ -92,6 +92,37 @@ def processJson(opt, u_socket, json_data):
                 success += 1
         print "'--add-json' result: total add: %d, success %d."%(total,success)
 
+class pool():
+    cursor = -1
+    pool_dict={}
+
+    def __init__(self, size, start=0):
+        self.start=start
+        self.size=size
+        self.end=start+size
+        for i in range(start,start+size):
+            self.pool_dict[i]=0
+    
+    def set(self, index, val):
+        if self.pool_dict.has_key(index):
+            self.pool_dict[index]=val
+
+    def get(self):
+        if self.cursor == -1:
+            self.cursor = self.start
+        for i in range(self.cursor, self.end):
+            if self.pool_dict[i]==0:
+                self.cursor = i
+                return self.cursor
+        self.cursor = -1
+        return self.cursor
+
+    def check(self,index):
+        if self.pool_dict.has_key(index):
+            return self.pool_dict[index]
+        else:
+            return -1
+
 class ss_daemon():
     manAddr = "/tmp/manager.sock"
     sockAddr = "/tmp/client.sock"
@@ -102,6 +133,8 @@ class ss_daemon():
     daemon_isRun = True
 
     cmd_queue = Queue.Queue(5)
+
+    portpool = pool(11,7890)
 
     def __init__(self, **kwargs):
         self.setOpt(kwargs, "managerAddr", self.manAddr)
@@ -123,19 +156,48 @@ class ss_daemon():
             fd.write("[%s]\t%s\n"%(self.currentTime(),msg))
             fd.close()
 
-        thd_control = threading.Thread(target = self.daemon_control)
-        thd_control.start()
-        thd_update = threading.Thread(target = self.daemon_generalupdate)
-        thd_update.start()
+        #connect database
         self.db = ss_database(self.dbPath)
         self.db.connect()
+        ''' 
+        #add ss-server from database
+        sql = "select id,password from port"
+        total = 0
+        success = 0
+        for port_info in self.db.db.execute(sql):
+            total += 1
+            ack = self.sock.cmd(createCMD("add", server_port = int(port_info[0]), password = port_info[1]))
+            if ack == "ok":
+                success += 1
+        logfd = open(self.logPath,'a')
+        self.deamon_log(logfd,"open server port from data base, total: %d success: %d"%(total,success))
+        logfd.close()
+        '''
+        #init port pool, will use database soon
+        sql = "select id from port"
+        result = self.db.db.execute(sql)
+        for info in result:
+            self.portpool.set(int(info[0]),1)
 
-        while self.daemon_isRun:
-            try:
-                cmd = self.cmd_queue.get(timeout=11)
-            except Queue.Empty:
-                break
-            self.daemon_process(cmd)
+        #create thread
+        thd_control = threading.Thread(target = self.daemon_control)
+        thd_update = threading.Thread(target = self.daemon_generalupdate)
+        
+        #thread start
+        thd_control.start()
+        thd_update.start()
+
+        try:
+            while self.daemon_isRun:
+                try:
+                    cmd = self.cmd_queue.get(timeout=11)
+                except Queue.Empty:
+                    break
+                self.daemon_process(cmd)
+        except Exception,msg:
+            test = open('/tmp/test.log','w')
+            test.write("[%s]%s"%(self.currentTime(),msg))
+            test.close()
 
         self.db.disconnect()
         
@@ -187,9 +249,11 @@ class ss_daemon():
                 #first update
                 sql = "update port set datausage=%.2f,updatetime=current_timestamp where id=%d"%(mb, int(server))
                 self.db.db.execute(sql)
+                '''
                 #if no update happened then insert one
                 sql = "insert into port (id, datausage, updatetime) select %d,%.2f,current_timestamp where( select Changes() = 0)"%(int(server), mb)
                 self.db.db.execute(sql)
+                '''
             self.db.db.commit()
         elif cmd == 'save+':
             sql = "select id,datausage,datahistory from port"
@@ -209,11 +273,54 @@ class ss_daemon():
                 sql = "update port set datahistory=%.2f where id=%d"%(history, port)
                 self.db.db.execute(sql)
             self.db.db.commit()
+        elif cmd == 'reset':
+            sql = "update port set datahistory=0.0"
+            self.db.db.execute(sql)
+            self.db.db.commit()
+        elif 'add' in cmd:
+            args = cmd.split(",")
+            info_list = [args[3],args[4]]
+            addr = (args[1],int(args[2]))
+            ack = self.sock.cmd(createCMD("add", server_port = int(info_list[0]), password = info_list[1]))
+            if ack == "ok":
+                sql = "insert into port (id, password) values (?,?)"
+                para = (int(info_list[0]),info_list[1])
+                self.db.db.execute(sql,para)
+                self.db.db.commit()
+                self.portpool.set(int(info_list[0]),1)
+            remotesock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            remotesock.sendto("%s"%ack,addr)
+            remotesock.close()
+        elif 'remove' in cmd:
+            args = cmd.split(",")
+            info_list = [args[3]]
+            addr = (args[1],int(args[2]))
+            ack = self.sock.cmd(createCMD("remove", server_port = int(info_list[0])))
+            if ack == "ok":
+                sql = "delete from port where id=?"
+                para = (int(info_list[0]),)
+                self.db.db.execute(sql,para)
+                self.db.db.commit()
+                self.portpool.set(int(info_list[0]),0)
+            remotesock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            remotesock.sendto("%s"%ack,addr)
+            remotesock.close()
+
+    def parseCMD(self, cmd):
+        start = cmd.find('{')
+        end = cmd.find('}')
+        if start==-1 or end==-1:
+            return []
+        msg = cmd[start+1:end].split(",")
+        return msg
+    
+    def deamon_log(self, fd, msg):
+        fd.write("[%s]\t%s\n"%(self.currentTime(), msg))
 
     def daemon_control(self):
         try:
             server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            addr = ('',7000)
+            addr = ('127.0.0.1',7000)
             server.bind(addr)
         except Exception, msg:
             logfd = open(self.logPath, 'a')
@@ -245,12 +352,15 @@ class ss_daemon():
             elif 'save_cover' in data:
                 logfd.write("[%s]\trecv cmd save and cover\n"%self.currentTime())
                 self.cmd_queue.put('save')
+            elif 'reset' in data:
+                logfd.write("[%s]\trecv cmd reset\n"%self.currentTime())
+                self.cmd_queue.put('reset')
             elif 'get' in data:
-                start = data.find('{')
-                end = data.find('}')
-                msg = data[start+1:end]
-                if 'get' in msg:
+                cmd = self.parseCMD(data)
+                if len(cmd)==0:
                     msg = "%d"%0
+                else:
+                    msg = cmd[0]
                 logfd.write("[%s]\trecv cmd get\n"%self.currentTime())
                 tmpdb = ss_database(self.dbPath)
                 tmpdb.connect()
@@ -263,8 +373,48 @@ class ss_daemon():
                     server.sendto("None",addr)
                 else:
                     server.sendto(result,addr)
-            
+            elif 'port_available' in data:
+                port = self.portpool.get()
+                if port==-1:
+                    server.sendto("None",addr)
+                else:
+                    server.sendto("%d"%port,addr)
+            elif 'add' in data:
+                self.deamon_log(logfd,"recv cmd add")
+                cmd = self.parseCMD(data)
+                try:
+                    if len(cmd)<2:
+                        raise ssmanErr("invalid args")
+                    try:
+                        port = int(cmd[0])
+                    except ValueError:
+                        raise ssmanErr("invalid args")
+                    ret = self.portpool.check(port)
+                    if ret==-1 or ret>0:
+                        raise ssmanErr("invalid port or port already exists")
+                    self.cmd_queue.put('add,%s,%d,%s,%s'%(addr[0],addr[1],cmd[0],cmd[1]))
+                except ssmanErr, err:
+                    self.deamon_log(logfd,"cmd add failed: %s"%err.msg)
+                    server.sendto("ERR",addr)
+            elif 'remove' in data:
+                self.deamon_log(logfd,"recv cmd remove")
+                cmd = self.parseCMD(data)
+                try:
+                    if len(cmd)<1:
+                        raise ssmanErr("invalid args")
+                    try:
+                        port = int(cmd[0])
+                    except ValueError:
+                        raise ssmanErr("invalid args")
+                    ret = self.portpool.check(port)
+                    if ret<1:
+                        raise ssmanErr("invalid port or port not exists")
+                    self.cmd_queue.put('remove,%s,%d,%s'%(addr[0],addr[1],cmd[0]))
+                except ssmanErr, err:
+                    self.deamon_log(logfd,"cmd remove failed: %s"%err.msg)
+                    server.sendto("ERR",addr)
             logfd.close()
+        server.close()
         self.daemon_isRun = False
 
 def main(argv=None):
@@ -398,7 +548,7 @@ def main(argv=None):
 
         elif cmd_service:
             daemon = ss_daemon(pidPath=pidPath)
-            #daemon.daemon_create()
+            daemon.daemon_create()
             daemon.daemon_exec()
             '''
             ****** Operation End ******

@@ -4,7 +4,7 @@ class ss_database:
     def __init__(self, dbPath):
         self.dbPath = dbPath
         self.connect()
-        sql = "create table IF NOT EXISTS port(id int primary key, datausage real default 0.0, datahistory real default 0.0, updatetime updatetime default current_timestamp)"
+        sql = "create table IF NOT EXISTS port(id int primary key, datausage real default 0.0, datahistory real default 0.0, updatetime updatetime default current_timestamp, password text)"
         self.cursor.execute(sql)
         self.disconnect()
 
@@ -24,3 +24,6 @@ class ss_database:
         ports = self.cursor.execute(sql)
         return ports.fetchall()
 
+class ssmanErr(Exception):
+    def __init__(self, msg):
+        self.msg = msg
